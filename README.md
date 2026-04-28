@@ -1,6 +1,6 @@
 # PUPO
 Official Implementation of paper:  "Purity Law for Neural Routing Problem Solvers with Enhanced Generalizability"\
-![image](images/PUPO.png)
+![image](PUPO_poster.png)
 [Paper link](https://openreview.net/pdf?id=6KlIzfkTfi)
 
 
