@@ -59,8 +59,11 @@ class Transformer_decoder_net(nn.Module):
         self.nb_layers_decoder = nb_layers_decoder
         self.decoder_layers = nn.ModuleList( [AutoRegressiveDecoderLayer(dim_emb, nb_heads) for _ in range(nb_layers_decoder-1)] )
         self.Wq_final = nn.Linear(dim_emb, dim_emb)
-            
-    def forward(self, h_t, K_att, V_att, mask=None):
+        # learnable scalar for purity-order edge bias on the final-layer logits
+        # (current-node -> candidate). Init 0 -> behavior bit-exact to original.
+        self.W_kp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, h_t, K_att, V_att, mask=None, kp_for_candidates=None):
         for l in range(self.nb_layers_decoder):
             K_att_l = K_att[:,:,l*self.dim_emb:(l+1)*self.dim_emb].contiguous()  # size(K_att_l)=(bsz, nb_nodes+1, dim_emb)
             V_att_l = V_att[:,:,l*self.dim_emb:(l+1)*self.dim_emb].contiguous()  # size(V_att_l)=(bsz, nb_nodes+1, dim_emb)
@@ -70,6 +73,7 @@ class Transformer_decoder_net(nn.Module):
                 q_final = self.Wq_final(h_t)
                 bsz = h_t.size(0)
                 q_final = q_final.view(bsz, 1, self.dim_emb)
-                attn_weights = myMHA(q_final, K_att_l, V_att_l, 1, mask, 10)[1] 
-        prob_next_node = attn_weights.squeeze(1) 
-        return prob_next_node 
+                edge_bias = self.W_kp * kp_for_candidates if kp_for_candidates is not None else None
+                attn_weights = myMHA(q_final, K_att_l, V_att_l, 1, mask, 10, edge_bias=edge_bias)[1]
+        prob_next_node = attn_weights.squeeze(1)
+        return prob_next_node

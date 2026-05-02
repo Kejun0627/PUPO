@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch.distributions.categorical import Categorical
 import numpy as np
-from utils.utils_for_model import is_vrp_finished, get_knn_candidate, create_distance_mask_for_knn
+from utils.utils_for_model import is_vrp_finished, get_knn_candidate, create_distance_mask_for_knn, compute_purity_order_all_pairs
 from encoder import state_encoder_vrp, action_encoder_vrp
 from decoder import Transformer_decoder_net
 
@@ -15,14 +15,16 @@ class VRP_net(nn.Module):
     
     
     def __init__(self, dim_input_nodes, dim_emb, dim_ff, num_state_encoder, nb_layers_state_encoder,nb_layers_action_encoder, nb_layers_decoder, nb_heads,
-                 batchnorm=True, if_agg_whole_graph = False):
+                 batchnorm=True, if_agg_whole_graph = False, use_edge_kp = False):
         super(VRP_net, self).__init__()
-        
+
         # basic info
         self.dim_input = dim_input_nodes
         self.dim_emb = dim_emb
         self.if_agg_whole_graph = if_agg_whole_graph
         self.num_state_encoder = num_state_encoder
+        # Same flag as TSP_net.use_edge_kp; default False -> bit-exact original.
+        self.use_edge_kp = use_edge_kp
         
         self.state_encoders = nn.ModuleList(
              [state_encoder_vrp(dim_input_nodes, dim_emb, dim_ff, nb_layers_state_encoder, nb_heads, batchnorm = batchnorm, if_agg_whole_graph =if_agg_whole_graph) 
@@ -78,6 +80,14 @@ class VRP_net(nn.Module):
         true_demands = torch.cat((true_demands,torch.zeros((bsz,1)).long().to(nodes.device)),dim=1).detach()
         full_demands = true_demands/capacity
 
+        # Precompute (B, N+1, N+1) purity matrix on full_graph (depot at index N).
+        # All Kp lookups below map -1 (depot sentinel) to N before indexing.
+        Kp_full = None
+        if self.use_edge_kp:
+            with torch.no_grad():
+                Kp_full = compute_purity_order_all_pairs(full_graph).float()
+        depot_orig_idx = nb_nodes  # depot's slot in full_graph / Kp_full
+
         ### list that will contain Long tensors of shape (bsz,) that gives the idx of the cities chosen at time t
         tours = []
 
@@ -126,18 +136,47 @@ class VRP_net(nn.Module):
                 action_mask = create_distance_mask_for_knn(last_visited_node,action_idx,nodes,action_mask)
             action_idx_for_choice = torch.cat((action_idx,depot_idx),dim=1)
 
+            # Map last_visited to its original index in full_graph (depot lives at N).
+            # last_visited_idx is (B, 1) with -1 indicating depot; rewrite -1 -> N.
+            if Kp_full is not None:
+                lv_orig = last_visited_idx.squeeze(1).clone()                  # (B,)
+                lv_orig[lv_orig < 0] = depot_orig_idx
+                # Build kp_action_sub: (B, action_k+2, action_k+2) for [candidates, last, depot]
+                depot_col = torch.full((bsz, 1), depot_orig_idx, dtype=action_idx.dtype, device=nodes.device)
+                orig_idx_action = torch.cat([action_idx, lv_orig.unsqueeze(1), depot_col], dim=1)  # (B, action_k+2)
+                sz = action_k + 2
+                row = orig_idx_action.unsqueeze(2).expand(-1, -1, sz)
+                col = orig_idx_action.unsqueeze(1).expand(-1, sz, -1)
+                b_idx = zero_to_bsz.view(bsz, 1, 1).expand(-1, sz, sz)
+                kp_action_sub = Kp_full[b_idx, row, col]
+            else:
+                lv_orig = None
+                kp_action_sub = None
+
             # action encoder
-            emb_action = self.action_encoder(nodes,action_idx,last_visited_node,depot,demands,remain_capacity_vec,encoder_mask=action_mask)
+            emb_action = self.action_encoder(nodes,action_idx,last_visited_node,depot,demands,remain_capacity_vec,encoder_mask=action_mask, kp_subgraph=kp_action_sub)
             emb_q = emb_action[:,action_k:(action_k+1),:]
             emb_q = torch.cat((emb_q,emb_action[:,(action_k+1):(action_k+2),:]),dim=2)
             emb_other = torch.cat((emb_action[:,:action_k,:],emb_action[:,(action_k+1):(action_k+2),:]),dim=1)
-            
+
             # state encoder
             for i in range(self.num_state_encoder):
                 temp_k = state_k[i]
                 temp_idx = state_idx[:,:temp_k].contiguous()
                 temp_mask = state_mask[:,:temp_k]
-                emb_state = self.state_encoders[i](nodes,temp_idx,last_visited_node,depot,demands,remain_capacity_vec,finished_mask = finished_mask,encoder_mask=temp_mask)
+
+                if Kp_full is not None:
+                    depot_col = torch.full((bsz, 1), depot_orig_idx, dtype=temp_idx.dtype, device=nodes.device)
+                    orig_idx_state = torch.cat([temp_idx, lv_orig.unsqueeze(1), depot_col], dim=1)  # (B, temp_k+2)
+                    sz = temp_k + 2
+                    row = orig_idx_state.unsqueeze(2).expand(-1, -1, sz)
+                    col = orig_idx_state.unsqueeze(1).expand(-1, sz, -1)
+                    b_idx = zero_to_bsz.view(bsz, 1, 1).expand(-1, sz, sz)
+                    kp_state_sub = Kp_full[b_idx, row, col]
+                else:
+                    kp_state_sub = None
+
+                emb_state = self.state_encoders[i](nodes,temp_idx,last_visited_node,depot,demands,remain_capacity_vec,finished_mask = finished_mask,encoder_mask=temp_mask, kp_subgraph=kp_state_sub)
                 emb_q = torch.cat((emb_q,emb_state[:,temp_k:(temp_k+1),:]),dim=2)
                 emb_q = torch.cat((emb_q,emb_state[:,(temp_k+1):(temp_k+2),:]),dim=2)
                 temp_other = torch.cat((emb_state[:,:action_k,:],emb_state[:,(temp_k+1):(temp_k+2),:]),dim=1)
@@ -151,8 +190,17 @@ class VRP_net(nn.Module):
             h_q = self.query_mlp(emb_q)
             K_att_decoder = self.WK_att_decoder(emb_other) # size(K_att)=(bsz, nb_nodes+1, dim_emb*nb_layers_decoder)
             V_att_decoder = self.WV_att_decoder(emb_other) # size(V_att)=(bsz, nb_nodes+1, dim_emb*nb_layers_decoder)
+
+            # Kp bias for decoder logits: edge from last_visited to each (action_k candidates, depot).
+            kp_for_candidates = None
+            if Kp_full is not None:
+                depot_col = torch.full((bsz, 1), depot_orig_idx, dtype=action_idx.dtype, device=nodes.device)
+                cand_orig = torch.cat([action_idx, depot_col], dim=1)  # (B, action_k+1)
+                kp_for_candidates = Kp_full[zero_to_bsz.unsqueeze(1), lv_orig.unsqueeze(1), cand_orig]
+                kp_for_candidates = kp_for_candidates.unsqueeze(1)  # (B, 1, action_k+1)
+
             # decode
-            prob_next_node = self.decoder(h_q, K_att_decoder, V_att_decoder, mask_for_decoder)
+            prob_next_node = self.decoder(h_q, K_att_decoder, V_att_decoder, mask_for_decoder, kp_for_candidates=kp_for_candidates)
             #print(prob_next_node)
 
             ### Next node choice

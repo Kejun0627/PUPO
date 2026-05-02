@@ -71,6 +71,7 @@ config_dict = {
     'if_use_local_mask': False,
     'if_agg_whole_graph': False,
     'tol': 1e-3,
+    'use_edge_kp': False,
 }
 
 state_k = [35, 50, 65]
@@ -96,19 +97,23 @@ if args.problem == 'tsp':
 
     model_train = TSP_net(args.dim_input_nodes, args.dim_emb, args.dim_ff, args.num_state_encoder,
                           args.nb_layers_state_encoder, args.nb_layers_action_encoder, args.nb_layers_decoder,
-                          args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph)
+                          args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph,
+                          use_edge_kp=args.use_edge_kp)
     model_baseline = TSP_net(args.dim_input_nodes, args.dim_emb, args.dim_ff, args.num_state_encoder,
                              args.nb_layers_state_encoder, args.nb_layers_action_encoder, args.nb_layers_decoder,
-                             args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph)
+                             args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph,
+                             use_edge_kp=args.use_edge_kp)
 
 elif args.problem == 'cvrp' or args.problem == 'sdvrp':
 
     model_train = VRP_net(args.dim_input_nodes, args.dim_emb, args.dim_ff, args.num_state_encoder,
                           args.nb_layers_state_encoder, args.nb_layers_action_encoder, args.nb_layers_decoder,
-                          args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph)
+                          args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph,
+                          use_edge_kp=args.use_edge_kp)
     model_baseline = VRP_net(args.dim_input_nodes, args.dim_emb, args.dim_ff, args.num_state_encoder,
                              args.nb_layers_state_encoder, args.nb_layers_action_encoder, args.nb_layers_decoder,
-                             args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph)
+                             args.nb_heads, batchnorm=args.batchnorm, if_agg_whole_graph=args.if_agg_whole_graph,
+                             use_edge_kp=args.use_edge_kp)
 
 else:
 
@@ -170,9 +175,10 @@ if args.problem == 'tsp':
     global_k = args.state_k
     if_use_local_mask = False
     data_path = args.data_path + 'data/'
-    run_tsp_test_knn(local_k, global_k, args.aug, model_baseline, if_use_local_mask, sizes, bszs, data_path, device,
+    run_tsp_test_knn(local_k, global_k, args.aug, model_baseline, 
+                     if_use_local_mask, sizes, bszs, data_path, device,
                      file, distributions, num_instance=num_instance)
-    run_tsplib_test_knn(model_baseline, args.action_k, args.state_k)
+    run_tsplib_test_knn(model_baseline, args.action_k, args.state_k, data_path)
 
 elif args.problem == 'cvrp':
 
@@ -187,4 +193,4 @@ elif args.problem == 'cvrp':
     data_path = args.data_path + 'data/'
     run_vrp_test_knn(local_k, global_k, args.aug, model_baseline, if_use_local_mask, sizes, bszs, data_path, device,
                      file, distributions, num_instance)
-    run_cvrplib_test_knn(model_baseline, args.action_k, args.state_k)
+    run_cvrplib_test_knn(model_baseline, args.action_k, args.state_k, data_path)

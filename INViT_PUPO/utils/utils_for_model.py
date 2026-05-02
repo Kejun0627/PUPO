@@ -310,6 +310,53 @@ def compute_purity_order(vertex1_coord, vertex2_coord, x):
     return purity_order
 
 
+def compute_purity_order_all_pairs(x: torch.Tensor) -> torch.Tensor:
+    """Vectorized all-pairs purity order: Kp[b, i, j] = #{p : (x_i - x_p) . (x_j - x_p) < 0}.
+
+    Bit-exact equivalent of calling ``compute_purity_order(x[:, i], x[:, j], x)`` for
+    every (i, j) pair. Diagonal entries Kp[b, i, i] are forced to 0 (an edge has no
+    self-purity).
+
+    Args:
+        x: (B, N, 2) tensor of node coordinates.
+
+    Returns:
+        (B, N, N) int32 tensor of purity orders. Symmetric: Kp[b, i, j] == Kp[b, j, i].
+
+    Memory note: the obvious vectorization materializes a (B, N, N, N) intermediate.
+    For N >= ~256 that's prohibitive (e.g., B=64, N=256 -> ~1 GB at fp32). We chunk
+    along the i axis so peak memory is O(B * chunk * N * N * 4 bytes); chunk size is
+    auto-tuned to keep peak under ~256 MB by default.
+    """
+    B, N, D = x.shape
+    assert D == 2, f"compute_purity_order_all_pairs expects 2D coords, got D={D}"
+
+    # auto-pick chunk size: target ~256 MB for the (B, chunk, N, N) intermediate.
+    # bytes_per_elem = 4 (fp32), so chunk <= 256e6 / (B * N * N * 4)
+    target_bytes = 256 * 1024 * 1024
+    chunk = max(1, target_bytes // max(1, B * N * N * 4))
+    chunk = min(chunk, N)
+
+    Kp = torch.zeros((B, N, N), dtype=torch.int32, device=x.device)
+    # x: (B, N, 2)  ; x_p (the "test point") iterates over the same N nodes.
+    # For each i in chunk, j in 0..N: count of p s.t. (x_i - x_p).(x_j - x_p) < 0.
+    x_p = x.unsqueeze(1).unsqueeze(1)            # (B, 1, 1, N, 2) — broadcast as p
+    for i_start in range(0, N, chunk):
+        i_end = min(i_start + chunk, N)
+        x_i = x[:, i_start:i_end].unsqueeze(2).unsqueeze(3)   # (B, chunk, 1, 1, 2)
+        x_j = x.unsqueeze(1).unsqueeze(3)                      # (B, 1, N, 1, 2)
+        # (x_i - x_p) . (x_j - x_p) < 0
+        inner = ((x_i - x_p) * (x_j - x_p)).sum(dim=-1)        # (B, chunk, N, N)
+        # count over p (last dim)
+        Kp_chunk = (inner < 0).sum(dim=-1).to(torch.int32)     # (B, chunk, N)
+        Kp[:, i_start:i_end] = Kp_chunk
+
+    # zero the diagonal (an edge from i to i is not a real edge)
+    diag_idx = torch.arange(N, device=x.device)
+    Kp[:, diag_idx, diag_idx] = 0
+    return Kp
+
+
 def compute_remaining_purity_order_mean(x_unvisited, x):
     """
     Compute the length of a batch of tours

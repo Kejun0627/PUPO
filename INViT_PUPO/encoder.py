@@ -30,14 +30,14 @@ class Transformer_encoder_net(nn.Module):
         self.nb_heads = nb_heads
         self.batchnorm = batchnorm
         
-    def forward(self, h, mask=None):      
-        # PyTorch nn.MultiheadAttention requires input size (seq_len, bsz, dim_emb) 
-        h = h.transpose(0,1) # size(h)=(nb_nodes, bsz, dim_emb)  
+    def forward(self, h, mask=None, edge_bias=None):
+        # PyTorch nn.MultiheadAttention requires input size (seq_len, bsz, dim_emb)
+        h = h.transpose(0,1) # size(h)=(nb_nodes, bsz, dim_emb)
         # L layers
         for i in range(self.nb_layers):
             h_rc = h # residual connection, size(h_rc)=(nb_nodes, bsz, dim_emb)
             h = h.transpose(0,1)
-            h, score = self.MHA_layers[i](h, h, h, mask) # size(h)=(nb_nodes, bsz, dim_emb), size(score)=(bsz, nb_nodes, nb_nodes)
+            h, score = self.MHA_layers[i](h, h, h, mask, edge_bias=edge_bias) # size(h)=(nb_nodes, bsz, dim_emb), size(score)=(bsz, nb_nodes, nb_nodes)
             h = h.transpose(0,1)
             # add residual connection
             h = h_rc + h # size(h)=(nb_nodes, bsz, dim_emb)
@@ -77,7 +77,11 @@ class state_encoder_tsp(nn.Module):
         # encoder layer
         self.encoder = Transformer_encoder_net(nb_layers_encoder, dim_emb, nb_heads, dim_ff, batchnorm)
 
-    def forward(self,graph,idx,last_visited_node,first_visited_node,mask=None):
+        # learnable scalar for purity-order edge bias; init to 0 so the encoder is bit-exact
+        # to its original behavior at training step 0 (and forever if kp_subgraph stays None).
+        self.W_kp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, graph, idx, last_visited_node, first_visited_node, mask=None, kp_subgraph=None):
         bsz = idx.size(0)
         k = idx.size(1)
         idx_for_ref = idx.view((bsz*k,))
@@ -108,9 +112,10 @@ class state_encoder_tsp(nn.Module):
             emb_input = torch.cat((emb_input,emb_agg),dim=1)
         
         # encoding
-        emb_out,_ = self.encoder(emb_input,mask)
+        edge_bias = self.W_kp * kp_subgraph if kp_subgraph is not None else None
+        emb_out,_ = self.encoder(emb_input, mask, edge_bias=edge_bias)
         return emb_out
-        
+
 class action_encoder_tsp(nn.Module):
 
     def __init__(self, dim_input_nodes, dim_emb, dim_ff, nb_layers_encoder, nb_heads, batchnorm = True):
@@ -121,7 +126,10 @@ class action_encoder_tsp(nn.Module):
         # encoder layer
         self.encoder = Transformer_encoder_net(nb_layers_encoder, dim_emb, nb_heads, dim_ff, batchnorm)
 
-    def forward(self,graph,idx,last_visited_node,mask=None):
+        # learnable scalar for purity-order edge bias (see state_encoder_tsp.W_kp)
+        self.W_kp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, graph, idx, last_visited_node, mask=None, kp_subgraph=None):
         bsz = idx.size(0)
         k = idx.size(1)
         idx_for_ref = idx.view((bsz*k,))
@@ -142,9 +150,10 @@ class action_encoder_tsp(nn.Module):
         emb_last = self.input_emb_for_last(scaled_last)
         emb_remain = self.input_emb(scaled_remain)
         emb_input = torch.cat((emb_remain,emb_last),dim=1)
-        
+
         # encoding
-        emb_out,_ = self.encoder(emb_input,mask_for_encoder)
+        edge_bias = self.W_kp * kp_subgraph if kp_subgraph is not None else None
+        emb_out,_ = self.encoder(emb_input, mask_for_encoder, edge_bias=edge_bias)
         return emb_out
 
 
@@ -162,7 +171,10 @@ class state_encoder_vrp(nn.Module):
         # encoder layer
         self.encoder = Transformer_encoder_net(nb_layers_encoder, dim_emb, nb_heads, dim_ff, batchnorm)
 
-    def forward(self,graph,idx,last_visited_node,first_visited_node,demands, remain_capacity_vec, finished_mask = None, encoder_mask=None, depot_mask=None):
+        # learnable scalar for purity-order edge bias (see state_encoder_tsp.W_kp)
+        self.W_kp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, graph, idx, last_visited_node, first_visited_node, demands, remain_capacity_vec, finished_mask=None, encoder_mask=None, depot_mask=None, kp_subgraph=None):
         bsz = idx.size(0)
         k = idx.size(1)
         nb_nodes = graph.size(1)
@@ -207,9 +219,10 @@ class state_encoder_vrp(nn.Module):
         
         # encoding
         mask_for_encoder = mask_for_encoder.view((bsz,1,-1)).bool()
-        emb_out,_ = self.encoder(emb_input,mask_for_encoder)
+        edge_bias = self.W_kp * kp_subgraph if kp_subgraph is not None else None
+        emb_out,_ = self.encoder(emb_input, mask_for_encoder, edge_bias=edge_bias)
         return emb_out
-        
+
 class action_encoder_vrp(nn.Module):
 
     def __init__(self, dim_input_nodes, dim_emb, dim_ff, nb_layers_encoder, nb_heads, batchnorm = True):
@@ -221,7 +234,10 @@ class action_encoder_vrp(nn.Module):
         # encoder layer
         self.encoder = Transformer_encoder_net(nb_layers_encoder, dim_emb, nb_heads, dim_ff, batchnorm)
 
-    def forward(self,graph,idx,last_visited_node,first_visited_node,demands, remain_capacity_vec, encoder_mask=None, depot_mask=None):
+        # learnable scalar for purity-order edge bias (see state_encoder_tsp.W_kp)
+        self.W_kp = nn.Parameter(torch.zeros(1))
+
+    def forward(self, graph, idx, last_visited_node, first_visited_node, demands, remain_capacity_vec, encoder_mask=None, depot_mask=None, kp_subgraph=None):
 
         bsz = idx.size(0)
         k = idx.size(1)
@@ -246,8 +262,9 @@ class action_encoder_vrp(nn.Module):
         emb_remain = self.input_emb(scaled_remain)
         emb_input = torch.cat((emb_remain,emb_last),dim=1)
         emb_input = torch.cat((emb_input,emb_first),dim=1)
-        
+
         # encoding
         mask_for_encoder = mask_for_encoder.view((bsz,1,-1)).bool()
-        emb_out,_ = self.encoder(emb_input,mask_for_encoder)
+        edge_bias = self.W_kp * kp_subgraph if kp_subgraph is not None else None
+        emb_out,_ = self.encoder(emb_input, mask_for_encoder, edge_bias=edge_bias)
         return emb_out
